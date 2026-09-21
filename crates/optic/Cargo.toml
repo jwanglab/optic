@@ -1,0 +1,23 @@
+[package]
+name = "optic"
+description = "Open Pediatric Tissue Classifier: inference and federated updates for nanopore modBAMs, pileups, and array betas"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+optic-core = { path = "../optic-core" }
+candle-core.workspace = true
+candle-nn.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rayon.workspace = true
+csv = "1"
+noodles = { version = "0.109", features = ["bam", "sam", "core", "csi", "bgzf"] }
+sha2 = "0.10"
+
+[[bin]]
+name = "optic"
+path = "src/main.rs"

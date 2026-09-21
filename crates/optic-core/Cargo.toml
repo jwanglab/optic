@@ -1,0 +1,13 @@
+[package]
+name = "optic-core"
+description = "Shared model and reporting for optic"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+candle-core.workspace = true
+candle-nn.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true

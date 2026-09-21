@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = ["crates/optic-core", "crates/optic"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+candle-core = "0.11"
+candle-nn = "0.11"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rayon = "1.10"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
