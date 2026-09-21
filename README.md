@@ -4,7 +4,7 @@ Hierarchical methylation-based classifier focused on pediatric hematologic, (ex-
 Runs on nanopore modBAMs (MM/ML tags), modkit pileups, or beta values.
 
 ```bash
-cargo build --release optic
+cargo build --release
 ```
 
 ## Model
