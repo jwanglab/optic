@@ -28,7 +28,21 @@ pub struct Prediction {
 
 impl Net {
     pub fn load(path: &Path, n_probes: usize, device: &Device) -> Result<Self> {
-        let w = candle_core::safetensors::load(path, device)
+        // Read in bounded chunks: a single fd_read over a ~373 MB buffer returns
+        // ENOMEM under WASI, which a whole-file std::fs::read triggers.
+        let data = {
+            use std::io::Read;
+            let mut f = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+            let mut v = Vec::new();
+            let mut buf = vec![0u8; 8 << 20];
+            loop {
+                let n = f.read(&mut buf)?;
+                if n == 0 { break; }
+                v.extend_from_slice(&buf[..n]);
+            }
+            v
+        };
+        let w = candle_core::safetensors::load_buffer(&data, device)
             .with_context(|| format!("loading {}", path.display()))?;
         let get = |k: &str| -> Result<Tensor> {
             w.get(k).ok_or_else(|| anyhow!("missing weight {k}"))

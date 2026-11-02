@@ -26,10 +26,31 @@ pub struct UpdateMeta {
     pub grad_norm: f32,
 }
 
+/// Whole-file reads over ~100 MB trip ENOMEM under WASI; read in bounded chunks.
+pub fn read_chunked(path: &Path) -> Result<Vec<u8>> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let mut v = Vec::new();
+    let mut buf = vec![0u8; 8 << 20];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 { break; }
+        v.extend_from_slice(&buf[..n]);
+    }
+    Ok(v)
+}
+
 pub fn sha256_file(path: &Path) -> Result<String> {
     use sha2::{Digest, Sha256};
+    use std::io::Read;
     let mut h = Sha256::new();
-    h.update(std::fs::read(path)?);
+    let mut f = std::fs::File::open(path)?;
+    let mut buf = vec![0u8; 8 << 20];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 { break; }
+        h.update(&buf[..n]);
+    }
     Ok(format!("{:x}", h.finalize()))
 }
 
@@ -92,7 +113,7 @@ pub fn merge(base: &Model, updates: &[std::path::PathBuf], lr: f32, max_grad_nor
              out_dir: &Path, out_patch: Option<&Path>, device: &Device) -> Result<()> {
     let base_st = base.dir.join("optic.safetensors");
     let base_sha = sha256_file(&base_st)?;
-    let mut weights = candle_core::safetensors::load(&base_st, device)?;
+    let mut weights = candle_core::safetensors::load_buffer(&read_chunked(&base_st)?, device)?;
     let mut grad_sum: HashMap<String, Tensor> = HashMap::new();
     let mut n_total = 0usize; let mut heads = std::collections::BTreeSet::new(); let mut counts: HashMap<String, usize> = HashMap::new();
     let mut norms: Vec<(String, f32)> = Vec::new();
@@ -187,8 +208,8 @@ pub fn apply(base: &Model, patch: &Path, out_dir: &Path, device: &Device) -> Res
         bail!("this model is {} but the patch applies to {} - update to that release first",
               &have[..12], &meta.base_sha256[..12]);
     }
-    let mut weights = candle_core::safetensors::load(&base_st, device)?;
-    let new = candle_core::safetensors::load(patch, device)?;
+    let mut weights = candle_core::safetensors::load_buffer(&read_chunked(&base_st)?, device)?;
+    let new = candle_core::safetensors::load_buffer(&read_chunked(patch)?, device)?;
     for (k, t) in &new {
         let old = weights.get(k).ok_or_else(|| anyhow!("patch carries {k}, which this model does not have"))?;
         if old.dims() != t.dims() { bail!("{k}: patch is {:?} but this model has {:?}", t.dims(), old.dims()); }
