@@ -1,0 +1,12 @@
+[package]
+name = "blitzgz"
+version = "0.1.0"
+edition = "2024"
+description = "Fast pure-Rust DEFLATE/gzip/BGZF decompression"
+license = "MIT"
+
+[dependencies]
+
+[features]
+# Replace every `unsafe` fast path with bounds-checked safe code.
+safe = []

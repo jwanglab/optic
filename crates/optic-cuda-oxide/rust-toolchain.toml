@@ -1,0 +1,4 @@
+# cuda-oxide's pinned toolchain (rustc-dev for the codegen backend, llvm-tools for llc)
+[toolchain]
+channel = "1.99.1"
+components = ["rust-src", "rustc-dev", "llvm-tools"]

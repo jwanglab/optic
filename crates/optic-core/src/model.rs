@@ -1,4 +1,4 @@
-//! lineage.json, optic.safetensors, probe_subset.bed
+//! lineage.json, optic.safetensors, probes.T2T.bed
 
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
@@ -118,7 +118,7 @@ pub struct Model {
 impl Model {
     pub fn load(dir: &Path) -> Result<Self> {
 
-        // A model is exactly three files: lineage.json, optic.safetensors, probe_subset.bed.
+        // model consists of lineage.json, optic.safetensors, and probes.T2T.bed
         let doc: RefDoc = serde_json::from_str(
             &std::fs::read_to_string(dir.join("lineage.json"))
                 .with_context(|| format!("{} has no lineage.json", dir.display()))?)

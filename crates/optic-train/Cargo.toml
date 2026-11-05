@@ -1,0 +1,20 @@
+[package]
+name = "optic-train"
+description = "CUDA trainer for the optic hierarchical tissue classifier (kernels in Rust via cuda-oxide)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[dependencies]
+optic-core = { path = "../optic-core" }
+cudarc = { version = "0.19", default-features = false, features = ["std", "driver", "nvrtc", "cuda-13000", "dynamic-loading"] }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rayon.workspace = true
+memmap2 = "0.9"
+
+[[bin]]
+name = "optic-train"
+path = "src/main.rs"

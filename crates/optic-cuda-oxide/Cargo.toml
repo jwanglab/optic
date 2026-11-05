@@ -1,0 +1,16 @@
+[package]
+name = "optic-cuda-oxide"
+description = "optic-train's CUDA kernels in Rust, compiled to PTX by the cuda-oxide rustc backend"
+version = "0.2.0"
+edition = "2024"
+license = "MIT"
+
+# Built on its own pinned toolchain with `cargo oxide build`, never as part of the optic workspace.
+[workspace]
+
+[dependencies]
+cuda-device = { git = "https://github.com/NVIDIA/cuda-rust.git", rev = "2718c23" }
+libm = "0.2"
+
+[profile.release]
+debug = false

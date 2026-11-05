@@ -1,7 +1,7 @@
 use optic_core::model::Model;
 use optic_core::net::Net;
 use anyhow::{anyhow, bail, Context, Result};
-use candle_core::{DType, Device, Tensor, Var};
+use optic_core::st::{self, Tensor, Tensors};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -26,12 +26,7 @@ pub struct UpdateMeta {
     pub grad_norm: f32,
 }
 
-pub fn sha256_file(path: &Path) -> Result<String> {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(std::fs::read(path)?);
-    Ok(format!("{:x}", h.finalize()))
-}
+pub fn sha256_file(path: &Path) -> Result<String> { crate::sha256::file_hex(path) }
 
 /// Class mask for a label: one class, or every leaf under a node of the cell-of-origin tree.
 fn label_mask(label: &str, names: &[String], model: &Model, head: &str) -> Result<Vec<f32>> {
@@ -50,50 +45,34 @@ fn label_mask(label: &str, names: &[String], model: &Model, head: &str) -> Resul
 }
 
 /// One backward pass over `proj` (n x 256, the frozen `first.0` projection) for `head`.
-/// Returns summed gradients for every parameter above `first.0`, and the mean loss.
-pub fn contribute(net: &Net, head: &str, proj: &Tensor, masks: &[Vec<f32>], device: &Device)
-    -> Result<(HashMap<String, Tensor>, f32)> {
-    let params = net.federated_params(head).ok_or_else(|| anyhow!("no head {head}"))?;
-    let vars: Vec<(String, Var)> = params.iter()
-        .map(|(k, t)| Ok((k.clone(), Var::from_tensor(t)?))).collect::<Result<_>>()?;
-    let tensors: Vec<(String, Tensor)> = vars.iter().map(|(k, v)| (k.clone(), v.as_tensor().clone())).collect();
-    let logits = optic_core::net::forward_from_proj(proj, net.n_blocks(), head, &tensors)?;
-    let n = masks.len(); let k = masks[0].len();
-    let mask = Tensor::from_vec(masks.concat(), (n, k), device)?;
-    let lse = logits.exp()?.sum_keepdim(1)?.log()?;
-    let masked = (&logits + ((mask - 1.0)? * 1e4)?)?;
-    let lse_m = masked.exp()?.sum_keepdim(1)?.log()?;
-    let loss_sum = (lse - lse_m)?.sum_all()?;
-    let grads = loss_sum.backward()?;
-    let mut out = HashMap::new();
-    for (name, var) in &vars {
-        let g = grads.get(var).ok_or_else(|| anyhow!("no gradient for {name}"))?;
-        out.insert(format!("grad.{name}"), g.detach());
-    }
-    Ok((out, loss_sum.to_scalar::<f32>()? / n as f32))
+/// Returns summed gradients for every parameter above `first.0` (keyed `grad.<name>`), and the mean loss.
+pub fn contribute(net: &Net, head: &str, proj: &[f32], masks: &[Vec<f32>]) -> Result<(Tensors, f32)> {
+    let n = masks.len();
+    let (logits, trace) = net.forward_train(proj, n, head)?;
+    let (loss_sum, dlogits) = optic_core::net::set_nll(&logits, masks);
+    let grads = net.backward(&trace, &dlogits)?;
+    Ok((grads.into_iter().map(|(k, g)| (format!("grad.{k}"), g)).collect(), loss_sum / n as f32))
 }
 
 /// L2 norm over every gradient tensor in an update.
-pub fn grad_norm(grads: &HashMap<String, Tensor>) -> Result<f32> {
-    let mut acc = 0.0f32;
-    for g in grads.values() { acc += g.sqr()?.sum_all()?.to_scalar::<f32>()?; }
-    Ok(acc.sqrt())
+pub fn grad_norm(grads: &Tensors) -> f32 {
+    grads.values().map(|g| g.data.iter().map(|v| v * v).sum::<f32>()).sum::<f32>().sqrt()
 }
 
 pub fn label_mask_pub(label: &str, names: &[String], model: &Model, head: &str) -> Result<Vec<f32>> { label_mask(label, names, model, head) }
 
-pub fn write_update(path: &Path, grads: &HashMap<String, Tensor>, meta: &UpdateMeta) -> Result<()> {
-    candle_core::safetensors::save(grads, path).with_context(|| format!("writing {}", path.display()))?;
+pub fn write_update(path: &Path, grads: &Tensors, meta: &UpdateMeta) -> Result<()> {
+    st::save(grads, path).with_context(|| format!("writing {}", path.display()))?;
     std::fs::write(path.with_extension("json"), serde_json::to_string_pretty(meta)?)?;
     Ok(())
 }
 
 pub fn merge(base: &Model, updates: &[std::path::PathBuf], lr: f32, max_grad_norm: f32,
-             out_dir: &Path, out_patch: Option<&Path>, device: &Device) -> Result<()> {
+             out_dir: &Path, out_patch: Option<&Path>) -> Result<()> {
     let base_st = base.dir.join("optic.safetensors");
     let base_sha = sha256_file(&base_st)?;
-    let mut weights = candle_core::safetensors::load(&base_st, device)?;
-    let mut grad_sum: HashMap<String, Tensor> = HashMap::new();
+    let mut weights = st::load(&base_st)?;
+    let mut grad_sum = Tensors::new();
     let mut n_total = 0usize; let mut heads = std::collections::BTreeSet::new(); let mut counts: HashMap<String, usize> = HashMap::new();
     let mut norms: Vec<(String, f32)> = Vec::new();
     for u in updates {
@@ -102,11 +81,10 @@ pub fn merge(base: &Model, updates: &[std::path::PathBuf], lr: f32, max_grad_nor
         if meta.base_sha256 != base_sha { bail!("{} was computed against base {} but merging into {}", u.display(), &meta.base_sha256[..12], &base_sha[..12]); }
         let names = base.class_names(&meta.head).ok_or_else(|| anyhow!("base has no head {}", meta.head))?;
         if names != meta.class_names.as_slice() { bail!("{} class names differ from base head {}", u.display(), meta.head); }
-        let g: HashMap<String, Tensor> = candle_core::safetensors::load(u, device)?
-            .into_iter().map(|(k, t)| Ok((k, t.to_dtype(DType::F32)?))).collect::<Result<_>>()?;
+        let g = st::load(u)?;
 
         // trust but verify what the federated data say
-        let observed = grad_norm(&g)?;
+        let observed = grad_norm(&g);
         if !observed.is_finite() { bail!("{}: gradient norm is not finite ({observed})", u.display()); }
         if (observed - meta.grad_norm).abs() > 1e-3 * observed.max(1.0) {
             bail!("{}: declares |grad| {:.4} but the payload is {:.4}", u.display(), meta.grad_norm, observed);
@@ -118,7 +96,13 @@ pub fn merge(base: &Model, updates: &[std::path::PathBuf], lr: f32, max_grad_nor
         }
         norms.push((u.display().to_string(), per_sample));
 
-        for (k, t) in g { grad_sum.entry(k).and_modify(|s| { *s = (&*s + &t).unwrap(); }).or_insert(t); }
+        for (k, t) in g {
+            match grad_sum.get_mut(&k) {
+                Some(s) if s.shape == t.shape => s.data.iter_mut().zip(&t.data).for_each(|(a, b)| *a += b),
+                Some(s) => bail!("{}: {k} is {:?} but an earlier update has {:?}", u.display(), t.shape, s.shape),
+                None => { grad_sum.insert(k, t); }
+            }
+        }
         n_total += meta.n_samples; heads.insert(meta.head.clone());
         for (l, c) in meta.label_counts { *counts.entry(l).or_default() += c; }
     }
@@ -132,14 +116,14 @@ pub fn merge(base: &Model, updates: &[std::path::PathBuf], lr: f32, max_grad_nor
         let flag = if median > 0.0 && *v > 10.0 * median { "   <- 10x the median, check it out" } else { "" };
         eprintln!("  per-sample |grad| {:>10.4}  {}{}", v, name, flag);
     }
-    let mut patch: HashMap<String, Tensor> = HashMap::new();
+    let mut patch = Tensors::new();
+    let scale = (lr as f64 / n_total as f64) as f32;
     for (gk, g) in &grad_sum {
         let wk = gk.strip_prefix("grad.").ok_or_else(|| anyhow!("bad key {gk}"))?;
-        let w = weights.get(wk).ok_or_else(|| anyhow!("base lacks {wk}"))?.to_dtype(DType::F32)?;
-        let step = (g * (lr as f64 / n_total as f64))?;
-        let updated = (w - step)?;
-        weights.insert(wk.to_string(), updated.clone());
-        patch.insert(wk.to_string(), updated);
+        let w = weights.get_mut(wk).ok_or_else(|| anyhow!("base lacks {wk}"))?;
+        if w.shape != g.shape { bail!("{gk} is {:?} but the base {wk} is {:?}", g.shape, w.shape); }
+        w.data.iter_mut().zip(&g.data).for_each(|(w, g)| *w -= g * scale);
+        patch.insert(wk.to_string(), w.clone());
     }
     let n_changed = patch.len();
     std::fs::create_dir_all(out_dir)?;
@@ -147,7 +131,7 @@ pub fn merge(base: &Model, updates: &[std::path::PathBuf], lr: f32, max_grad_nor
         let f = f?; let name = f.file_name();
         if f.file_type()?.is_file() && name != "optic.safetensors" { std::fs::copy(f.path(), out_dir.join(&name))?; }
     }
-    candle_core::safetensors::save(&weights, out_dir.join("optic.safetensors"))?;
+    st::save(&weights, &out_dir.join("optic.safetensors"))?;
     let meta_name = "lineage.json";
     let mut manifest: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(base.dir.join(meta_name))?)?;
     manifest["federated"] = serde_json::json!({
@@ -162,7 +146,7 @@ pub fn merge(base: &Model, updates: &[std::path::PathBuf], lr: f32, max_grad_nor
     // The round trip only has to carry what moved. `first.0` is 96.8% of the weights and federation
     // never touches it, so a patch is ~12 MB against a 373 MB model.
     if let Some(pp) = out_patch {
-        let n_params: usize = patch.values().map(|t| t.elem_count()).sum();
+        let n_params: usize = patch.values().map(Tensor::len).sum();
         let meta = PatchMeta {
             base_sha256: base_sha.clone(),
             new_sha256: sha256_file(&out_dir.join("optic.safetensors"))?,
@@ -170,7 +154,7 @@ pub fn merge(base: &Model, updates: &[std::path::PathBuf], lr: f32, max_grad_nor
             n_params,
             federated: manifest["federated"].clone(),
         };
-        candle_core::safetensors::save(&patch, pp).with_context(|| format!("writing {}", pp.display()))?;
+        st::save(&patch, pp).with_context(|| format!("writing {}", pp.display()))?;
         std::fs::write(pp.with_extension("json"), serde_json::to_string_pretty(&meta)?)?;
         eprintln!("patch: {} tensors, {} params -> {} (+ .json)", meta.tensors.len(), n_params, pp.display());
     }
@@ -178,7 +162,7 @@ pub fn merge(base: &Model, updates: &[std::path::PathBuf], lr: f32, max_grad_nor
 }
 
 /// Apply a hub patch to a local model
-pub fn apply(base: &Model, patch: &Path, out_dir: &Path, device: &Device) -> Result<()> {
+pub fn apply(base: &Model, patch: &Path, out_dir: &Path) -> Result<()> {
     let meta: PatchMeta = serde_json::from_str(&std::fs::read_to_string(patch.with_extension("json"))?)
         .with_context(|| format!("reading {}", patch.with_extension("json").display()))?;
     let base_st = base.dir.join("optic.safetensors");
@@ -187,19 +171,19 @@ pub fn apply(base: &Model, patch: &Path, out_dir: &Path, device: &Device) -> Res
         bail!("this model is {} but the patch applies to {} - update to that release first",
               &have[..12], &meta.base_sha256[..12]);
     }
-    let mut weights = candle_core::safetensors::load(&base_st, device)?;
-    let new = candle_core::safetensors::load(patch, device)?;
+    let mut weights = st::load(&base_st)?;
+    let new = st::load(patch)?;
     for (k, t) in &new {
         let old = weights.get(k).ok_or_else(|| anyhow!("patch carries {k}, which this model does not have"))?;
-        if old.dims() != t.dims() { bail!("{k}: patch is {:?} but this model has {:?}", t.dims(), old.dims()); }
+        if old.shape != t.shape { bail!("{k}: patch is {:?} but this model has {:?}", t.shape, old.shape); }
     }
-    for (k, t) in new { weights.insert(k, t.to_dtype(DType::F32)?); }
+    weights.extend(new);
     std::fs::create_dir_all(out_dir)?;
     for f in std::fs::read_dir(&base.dir)? {
         let f = f?; let name = f.file_name();
         if f.file_type()?.is_file() && name != "optic.safetensors" { std::fs::copy(f.path(), out_dir.join(&name))?; }
     }
-    candle_core::safetensors::save(&weights, out_dir.join("optic.safetensors"))?;
+    st::save(&weights, &out_dir.join("optic.safetensors"))?;
     let got = sha256_file(&out_dir.join("optic.safetensors"))?;
     if got != meta.new_sha256 {
         bail!("applied cleanly but the result is {} and the hub published {} - do not use this model",

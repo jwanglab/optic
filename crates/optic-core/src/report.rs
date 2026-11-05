@@ -76,7 +76,7 @@ fn descend(tree: &crate::model::Tree, p: &[f32], leaf_names: &[String]) -> Vec<S
 }
 
 pub fn render(r: &Report, pred: &Prediction, model: &Model, source: &str) -> String {
-    let mut s = format!("optic {} v{}  |  {}\n  probes covered : {} / {}\n\n",
+    let mut s = format!("{} v{}  |  {}\n  probes covered : {} / {}\n\n",
         model.info.name, model.info.version, source, pred.n_covered, n_probes(model));
     let w = r.descent.iter().map(|x| x.node.chars().count()).max().unwrap_or(0).max(20);
     let mut cut = false;
@@ -97,7 +97,7 @@ pub fn render(r: &Report, pred: &Prediction, model: &Model, source: &str) -> Str
 }
 
 fn n_probes(model: &Model) -> usize {
-    std::fs::read_to_string(model.dir.join("probe_subset.bed"))
+    std::fs::read_to_string(model.dir.join("probes.T2T.bed"))
         .map(|s| s.lines().filter(|l| !l.starts_with("chrom") && !l.trim().is_empty()).count())
         .unwrap_or(0)
 }
