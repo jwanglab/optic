@@ -86,6 +86,25 @@ fn main() -> Result<()> {
             (bam::finalize_counts(counts)?, format!("counts {}", input.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(" + ")))
         }
         Cmd::Counts { .. } | Cmd::Inspect { .. } => unreachable!(),
+        Cmd::Eval { labels, threads } => {
+            let names = model.class_names(&model.head).unwrap_or(&[]);
+            for (i, line) in std::fs::read_to_string(labels)?.lines().enumerate() {
+                if line.trim().is_empty() || line.starts_with('#') { continue; }
+                let f: Vec<&str> = line.split('\t').collect();
+                if f.len() < 3 { anyhow::bail!("labels line {}: expected path<TAB>kind<TAB>label", i + 1); }
+                let cgs = load_sample(f[1], std::path::Path::new(f[0]), &model.dir, *threads, bam::DEFAULT_THRESHOLD_LOW, bam::DEFAULT_THRESHOLD_HIGH)?;
+                let (ternary, _) = probes.cgs_to_ternary(&cgs);
+                let pred = net.infer(&ternary)?;
+                let rep = report::build(&model, &pred);
+                let probs = pred.probs.iter().find(|(h, _)| *h == model.head).map(|(_, p)| p.as_slice()).unwrap_or(&[]);
+                println!("{}", serde_json::json!({
+                    "path": f[0], "label": f[2], "n_covered": pred.n_covered,
+                    "report": rep,
+                    "classes": names.iter().zip(probs).map(|(n, &q)| serde_json::json!({"class": n, "probability": q})).collect::<Vec<_>>(),
+                }));
+            }
+            return Ok(());
+        }
         Cmd::Contribute { head, labels, out, threads } => {
             let head = head.clone().unwrap_or_else(|| model.head.clone());
             let head = &head;
